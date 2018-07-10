@@ -1,5 +1,5 @@
-hash: 39480b2d0b820a118c7a65c7747be91b9cbccdf113cdef441a6916389dcb909b
-updated: 2018-07-10T09:50:04.770371649+02:00
+hash: ad341400b6885680b0accf19bbe1c67ede8bd9d7e922d2bd81e756b6b3afb324
+updated: 2018-07-10T11:55:21.75718395+02:00
 imports:
 - name: github.com/apache/thrift
   version: 53dd39833a08ce33582e5ff31fa18bb4735d6731
@@ -33,7 +33,7 @@ imports:
 - name: github.com/fsnotify/fsnotify
   version: c2828203cd70a50dcccfb2761f8b1f8ceef9a8e9
 - name: github.com/go-kit/kit
-  version: ca4112baa34cb55091301bdc13b1420a122b1b9e
+  version: 37dd21e10ccb4761e161e7264a5984f770ea18a5
   subpackages:
   - metrics
   - metrics/expvar
@@ -230,7 +230,8 @@ imports:
 - name: github.com/uber-go/atomic
   version: 1ea20fb1cbb1cc08cbd0d913a96dead89aa18289
 - name: github.com/uber/jaeger-client-go
-  version: b043381d944715b469fd6b37addfd30145ca1758
+  version: da9f1ad16b8771334d7cd1602cfc421aad8011a4
+  repo: https://github.com/mariusgiger/jaeger-client-go.git
   subpackages:
   - config
   - internal/baggage
@@ -250,7 +251,7 @@ imports:
   - transport/zipkin
   - utils
 - name: github.com/uber/jaeger-lib
-  version: 9001430452ee65fe1078ec4b0cb6c8fba274fac4
+  version: 33a8b83c4bb27ee5f00b59dc86084fe4afd9a8a1
   repo: https://github.com/mariusgiger/jaeger-lib.git
   subpackages:
   - metrics
