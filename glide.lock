@@ -1,5 +1,5 @@
-hash: fd38181e727fe22b8c0ca7be1798aaebab30ce41db3b5e2594cc0457c123d96c
-updated: 2018-07-10T07:54:54.752526312+02:00
+hash: 39480b2d0b820a118c7a65c7747be91b9cbccdf113cdef441a6916389dcb909b
+updated: 2018-07-10T09:50:04.770371649+02:00
 imports:
 - name: github.com/apache/thrift
   version: 53dd39833a08ce33582e5ff31fa18bb4735d6731
@@ -250,7 +250,8 @@ imports:
   - transport/zipkin
   - utils
 - name: github.com/uber/jaeger-lib
-  version: ed3a127ec5fef7ae9ea95b01b542c47fbd999ce5
+  version: 9001430452ee65fe1078ec4b0cb6c8fba274fac4
+  repo: https://github.com/mariusgiger/jaeger-lib.git
   subpackages:
   - metrics
   - metrics/adapters
