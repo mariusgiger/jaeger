@@ -16,7 +16,6 @@ package spanstore
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
@@ -24,9 +23,9 @@ import (
 	"go.uber.org/zap"
 	"gopkg.in/olivere/elastic.v5"
 
-	jModel "github.com/jaegertracing/jaeger/model/json"
 	"github.com/jaegertracing/jaeger/pkg/cache"
 	"github.com/jaegertracing/jaeger/pkg/es"
+	"github.com/jaegertracing/jaeger/plugin/storage/es/spanstore/dbmodel"
 	storageMetrics "github.com/jaegertracing/jaeger/storage/spanstore/metrics"
 )
 
@@ -68,16 +67,16 @@ func NewServiceOperationStorage(
 }
 
 // Write saves a service to operation pair.
-func (s *ServiceOperationStorage) Write(indexName string, jsonSpan *jModel.Span) {
+func (s *ServiceOperationStorage) Write(indexName string, jsonSpan *dbmodel.Span) {
 	// Insert serviceName:operationName document
 	service := Service{
 		ServiceName:   jsonSpan.Process.ServiceName,
 		OperationName: jsonSpan.OperationName,
 	}
-	serviceID := fmt.Sprintf("%s|%s", service.ServiceName, service.OperationName)
-	cacheKey := fmt.Sprintf("%s:%s", indexName, serviceID)
+
+	cacheKey := service.hashCode()
 	if !keyInCache(cacheKey, s.serviceCache) {
-		s.client.Index().Index(indexName).Type(serviceType).Id(serviceID).BodyJson(service).Add()
+		s.client.Index().Index(indexName).Type(serviceType).Id(cacheKey).BodyJson(service).Add()
 		writeCache(cacheKey, s.serviceCache)
 	}
 }

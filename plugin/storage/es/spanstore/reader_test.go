@@ -15,8 +15,10 @@
 package spanstore
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io/ioutil"
 	"testing"
 	"time"
 
@@ -28,9 +30,9 @@ import (
 	"gopkg.in/olivere/elastic.v5"
 
 	"github.com/jaegertracing/jaeger/model"
-	esJson "github.com/jaegertracing/jaeger/model/json"
 	"github.com/jaegertracing/jaeger/pkg/es/mocks"
 	"github.com/jaegertracing/jaeger/pkg/testutils"
+	"github.com/jaegertracing/jaeger/plugin/storage/es/spanstore/dbmodel"
 	"github.com/jaegertracing/jaeger/storage/spanstore"
 )
 
@@ -89,7 +91,13 @@ func withSpanReader(fn func(r *spanReaderTest)) {
 		client:    client,
 		logger:    logger,
 		logBuffer: logBuffer,
-		reader:    newSpanReader(client, logger, 72*time.Hour),
+		reader: newSpanReader(SpanReaderParams{
+			Client:            client,
+			Logger:            zap.NewNop(),
+			MaxLookback:       0,
+			IndexPrefix:       "",
+			TagDotReplacement: "@",
+		}),
 	}
 	fn(r)
 }
@@ -98,8 +106,34 @@ var _ spanstore.Reader = &SpanReader{} // check API conformance
 
 func TestNewSpanReader(t *testing.T) {
 	client := &mocks.Client{}
-	reader := NewSpanReader(client, zap.NewNop(), 0, metrics.NullFactory)
+	reader := NewSpanReader(SpanReaderParams{
+		Client:         client,
+		Logger:         zap.NewNop(),
+		MaxLookback:    0,
+		MetricsFactory: metrics.NullFactory,
+		IndexPrefix:    ""})
 	assert.NotNil(t, reader)
+}
+
+func TestNewSpanReaderIndexPrefix(t *testing.T) {
+	testCases := []struct {
+		prefix   string
+		expected string
+	}{
+		{prefix: "", expected: ""},
+		{prefix: "foo", expected: "foo:"},
+		{prefix: ":", expected: "::"},
+	}
+	for _, testCase := range testCases {
+		client := &mocks.Client{}
+		r := newSpanReader(SpanReaderParams{
+			Client:      client,
+			Logger:      zap.NewNop(),
+			MaxLookback: 0,
+			IndexPrefix: testCase.prefix})
+		assert.Equal(t, testCase.expected+spanIndex, r.spanIndexPrefix)
+		assert.Equal(t, testCase.expected+serviceIndex, r.serviceIndexPrefix)
+	}
 }
 
 func TestSpanReader_GetTrace(t *testing.T) {
@@ -118,7 +152,7 @@ func TestSpanReader_GetTrace(t *testing.T) {
 				},
 			}, nil)
 
-		trace, err := r.reader.GetTrace(model.NewTraceID(0, 1))
+		trace, err := r.reader.GetTrace(context.Background(), model.NewTraceID(0, 1))
 		require.NoError(t, err)
 		require.NotNil(t, trace)
 
@@ -149,7 +183,7 @@ func TestSpanReader_SearchAfter(t *testing.T) {
 				},
 			}, nil).Times(2)
 
-		trace, err := r.reader.GetTrace(model.NewTraceID(0, 1))
+		trace, err := r.reader.GetTrace(context.Background(), model.NewTraceID(0, 1))
 		require.NoError(t, err)
 		require.NotNil(t, trace)
 
@@ -168,7 +202,7 @@ func TestSpanReader_GetTraceQueryError(t *testing.T) {
 			Return(&elastic.MultiSearchResult{
 				Responses: []*elastic.SearchResult{},
 			}, nil)
-		trace, err := r.reader.GetTrace(model.NewTraceID(0, 1))
+		trace, err := r.reader.GetTrace(context.Background(), model.NewTraceID(0, 1))
 		require.EqualError(t, err, "No trace with that ID found")
 		require.Nil(t, trace)
 	})
@@ -187,7 +221,7 @@ func TestSpanReader_GetTraceNilHits(t *testing.T) {
 				},
 			}, nil)
 
-		trace, err := r.reader.GetTrace(model.NewTraceID(0, 1))
+		trace, err := r.reader.GetTrace(context.Background(), model.NewTraceID(0, 1))
 		require.EqualError(t, err, "No trace with that ID found")
 		require.Nil(t, trace)
 	})
@@ -210,7 +244,7 @@ func TestSpanReader_GetTraceInvalidSpanError(t *testing.T) {
 				},
 			}, nil)
 
-		trace, err := r.reader.GetTrace(model.NewTraceID(0, 1))
+		trace, err := r.reader.GetTrace(context.Background(), model.NewTraceID(0, 1))
 		require.Error(t, err, "invalid span")
 		require.Nil(t, trace)
 	})
@@ -234,7 +268,7 @@ func TestSpanReader_GetTraceSpanConversionError(t *testing.T) {
 				},
 			}, nil)
 
-		trace, err := r.reader.GetTrace(model.NewTraceID(0, 1))
+		trace, err := r.reader.GetTrace(context.Background(), model.NewTraceID(0, 1))
 		require.Error(t, err, "span conversion error, because lacks elements")
 		require.Nil(t, trace)
 	})
@@ -251,7 +285,7 @@ func TestSpanReader_esJSONtoJSONSpanModel(t *testing.T) {
 		span, err := r.reader.unmarshalJSONSpan(esSpanRaw)
 		require.NoError(t, err)
 
-		var expectedSpan esJson.Span
+		var expectedSpan dbmodel.Span
 		require.NoError(t, json.Unmarshal(exampleESSpan, &expectedSpan))
 		assert.EqualValues(t, &expectedSpan, span)
 	})
@@ -286,36 +320,38 @@ func TestSpanReaderFindIndices(t *testing.T) {
 			startTime: today.Add(-time.Millisecond),
 			endTime:   today,
 			expected: []string{
-				indexWithDate(spanIndexPrefix, today),
+				indexWithDate(spanIndex, today),
 			},
 		},
 		{
 			startTime: today.Add(-13 * time.Hour),
 			endTime:   today,
 			expected: []string{
-				indexWithDate(spanIndexPrefix, today),
-				indexWithDate(spanIndexPrefix, yesterday),
+				indexWithDate(spanIndex, today),
+				indexWithDate(spanIndex, yesterday),
 			},
 		},
 		{
 			startTime: today.Add(-48 * time.Hour),
 			endTime:   today,
 			expected: []string{
-				indexWithDate(spanIndexPrefix, today),
-				indexWithDate(spanIndexPrefix, yesterday),
-				indexWithDate(spanIndexPrefix, twoDaysAgo),
+				indexWithDate(spanIndex, today),
+				indexWithDate(spanIndex, yesterday),
+				indexWithDate(spanIndex, twoDaysAgo),
 			},
 		},
 	}
-	for _, testCase := range testCases {
-		actual := findIndices(spanIndexPrefix, testCase.startTime, testCase.endTime)
-		assert.EqualValues(t, testCase.expected, actual)
-	}
+	withSpanReader(func(r *spanReaderTest) {
+		for _, testCase := range testCases {
+			actual := r.reader.indicesForTimeRange(spanIndex, testCase.startTime, testCase.endTime)
+			assert.EqualValues(t, testCase.expected, actual)
+		}
+	})
 }
 
 func TestSpanReader_indexWithDate(t *testing.T) {
 	withSpanReader(func(r *spanReaderTest) {
-		actual := indexWithDate(spanIndexPrefix, time.Date(1995, time.April, 21, 4, 21, 19, 95, time.UTC))
+		actual := indexWithDate(spanIndex, time.Date(1995, time.April, 21, 4, 21, 19, 95, time.UTC))
 		assert.Equal(t, "jaeger-span-1995-04-21", actual)
 	})
 }
@@ -373,9 +409,9 @@ func testGet(typ string, t *testing.T) {
 
 func returnSearchFunc(typ string, r *spanReaderTest) ([]string, error) {
 	if typ == servicesAggregation {
-		return r.reader.GetServices()
+		return r.reader.GetServices(context.Background())
 	} else if typ == operationsAggregation {
-		return r.reader.GetOperations("someService")
+		return r.reader.GetOperations(context.Background(), "someService")
 	} else if typ == traceIDAggregation {
 		return r.reader.findTraceIDs(&spanstore.TraceQueryParameters{})
 	}
@@ -441,7 +477,7 @@ func TestSpanReader_FindTraces(t *testing.T) {
 			NumTraces:    1,
 		}
 
-		traces, err := r.reader.FindTraces(traceQuery)
+		traces, err := r.reader.FindTraces(context.Background(), traceQuery)
 		require.NoError(t, err)
 		assert.Len(t, traces, 1)
 
@@ -485,7 +521,7 @@ func TestSpanReader_FindTracesInvalidQuery(t *testing.T) {
 			StartTimeMax: time.Now(),
 		}
 
-		traces, err := r.reader.FindTraces(traceQuery)
+		traces, err := r.reader.FindTraces(context.Background(), traceQuery)
 		require.Error(t, err)
 		assert.Nil(t, traces)
 	})
@@ -517,7 +553,7 @@ func TestSpanReader_FindTracesAggregationFailure(t *testing.T) {
 			StartTimeMax: time.Now(),
 		}
 
-		traces, err := r.reader.FindTraces(traceQuery)
+		traces, err := r.reader.FindTraces(context.Background(), traceQuery)
 		require.Error(t, err)
 		assert.Nil(t, traces)
 	})
@@ -551,7 +587,7 @@ func TestSpanReader_FindTracesNoTraceIDs(t *testing.T) {
 			StartTimeMax: time.Now(),
 		}
 
-		traces, err := r.reader.FindTraces(traceQuery)
+		traces, err := r.reader.FindTraces(context.Background(), traceQuery)
 		require.NoError(t, err)
 		assert.Len(t, traces, 0)
 	})
@@ -584,7 +620,7 @@ func TestSpanReader_FindTracesReadTraceFailure(t *testing.T) {
 			StartTimeMax: time.Now(),
 		}
 
-		traces, err := r.reader.FindTraces(traceQuery)
+		traces, err := r.reader.FindTraces(context.Background(), traceQuery)
 		require.EqualError(t, err, "read error")
 		assert.Len(t, traces, 0)
 	})
@@ -622,7 +658,7 @@ func TestSpanReader_FindTracesSpanCollectionFailure(t *testing.T) {
 			StartTimeMax: time.Now(),
 		}
 
-		traces, err := r.reader.FindTraces(traceQuery)
+		traces, err := r.reader.FindTraces(context.Background(), traceQuery)
 		require.Error(t, err)
 		assert.Len(t, traces, 0)
 	})
@@ -830,45 +866,15 @@ func TestSpanReader_buildOperationNameQuery(t *testing.T) {
 }
 
 func TestSpanReader_buildTagQuery(t *testing.T) {
-	expectedStr :=
-		`{ "bool": {
-		   "should": [
-		      { "nested" : {
-			 "path" : "tags",
-			 "query" : {
-			    "bool" : {
-			      "must" : [
-				 { "match" : {"tags.key" : {"query":"bat"}} },
-				 { "match" : {"tags.value" : {"query":"spook"}} }
-			      ]
-		      }}}},
-		      { "nested" : {
-			 "path" : "process.tags",
-			 "query" : {
-			    "bool" : {
-			      "must" : [
-				 { "match" : {"process.tags.key" : {"query":"bat"}} },
-				 { "match" : {"process.tags.value" : {"query":"spook"}} }
-			      ]
-		      }}}},
-		      { "nested" : {
-			 "path" : "logs.fields",
-			 "query" : {
-		            "bool" : {
-			       "must" : [
-			         { "match" : {"logs.fields.key" : {"query":"bat"}} },
-			         { "match" : {"logs.fields.value" : {"query":"spook"}} }
-			       ]
-		      }}}}
-		   ]
-		}}`
+	inStr, err := ioutil.ReadFile("fixtures/query_01.json")
+	require.NoError(t, err)
 	withSpanReader(func(r *spanReaderTest) {
-		tagQuery := r.reader.buildTagQuery("bat", "spook")
+		tagQuery := r.reader.buildTagQuery("bat.foo", "spook")
 		actual, err := tagQuery.Source()
 		require.NoError(t, err)
 
 		expected := make(map[string]interface{})
-		json.Unmarshal([]byte(expectedStr), &expected)
+		json.Unmarshal(inStr, &expected)
 
 		assert.EqualValues(t, expected, actual)
 	})
@@ -893,7 +899,7 @@ func TestSpanReader_GetEmptyIndex(t *testing.T) {
 			NumTraces:    2,
 		}
 
-		services, err := r.reader.FindTraces(traceQuery)
+		services, err := r.reader.FindTraces(context.Background(), traceQuery)
 		require.NoError(t, err)
 		assert.Empty(t, services)
 	})

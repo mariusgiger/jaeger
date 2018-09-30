@@ -51,7 +51,7 @@ var (
 	}
 )
 
-func TestStandalone(t *testing.T) {
+func TestAllInOne(t *testing.T) {
 	// Check if the query service is available
 	if err := healthCheck(); err != nil {
 		t.Fatal(err)

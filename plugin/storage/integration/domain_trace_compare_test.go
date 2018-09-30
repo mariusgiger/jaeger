@@ -37,8 +37,11 @@ func CompareSliceOfTraces(t *testing.T, expected []*model.Trace, actual []*model
 			t.Log(err)
 		}
 		out, err := json.Marshal(actual)
+		out2, err2 := json.Marshal(expected)
 		assert.NoError(t, err)
+		assert.NoError(t, err2)
 		t.Logf("Actual traces: %s", string(out))
+		t.Logf("Expected traces: %s", string(out2))
 	}
 }
 
@@ -47,6 +50,8 @@ func CompareTraces(t *testing.T, expected *model.Trace, actual *model.Trace) {
 		require.Nil(t, actual.Spans)
 		return
 	}
+	require.NotNil(t, actual)
+	require.NotNil(t, actual.Spans)
 	model.SortTrace(expected)
 	model.SortTrace(actual)
 	checkSize(t, expected, actual)
