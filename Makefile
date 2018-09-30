@@ -34,7 +34,8 @@ GOTEST=go test -v $(RACE)
 GOLINT=golint
 GOVET=go vet
 GOFMT=gofmt
-GAS=gas -quiet -exclude=G104
+GOSEC=gosec -quiet -exclude=G104,G107
+GOSIMPLE=gosimple
 FMT_LOG=fmt.log
 LINT_LOG=lint.log
 IMPORT_LOG=import.log
@@ -93,7 +94,7 @@ test: go-gen
 
 .PHONY: integration-test
 integration-test: go-gen
-	$(GOTEST) -tags=integration ./cmd/standalone/...
+	$(GOTEST) -tags=integration ./cmd/all-in-one/...
 
 .PHONY: storage-integration-test
 storage-integration-test: go-gen
@@ -125,13 +126,14 @@ fmt:
 	$(GOFMT) -e -s -l -w $(ALL_SRC)
 	./scripts/updateLicenses.sh
 
-.PHONY: lint-gas
-lint-gas:
-	$(GAS) $(TOP_PKGS)
+.PHONY: lint-gosec
+lint-gosec:
+	$(GOSEC) $(TOP_PKGS)
 
 .PHONY: lint
-lint: lint-gas
+lint: lint-gosec
 	$(GOVET) $(TOP_PKGS)
+	$(GOSIMPLE) $(TOP_PKGS)
 	@cat /dev/null > $(LINT_LOG)
 	$(GOLINT) $(TOP_PKGS) | \
 		grep -v \
@@ -173,8 +175,8 @@ docker-hotrod:
 
 .PHONY: build_ui
 build_ui: install-statik
-	cd jaeger-ui && yarn install && npm run build
-	(cd cmd/query/app/ui/actual; statik -f -src ../../../../../jaeger-ui/build)
+	cd jaeger-ui && yarn install && cd packages/jaeger-ui && yarn build
+	(cd cmd/query/app/ui/actual; statik -f -src ../../../../../jaeger-ui/packages/jaeger-ui/build)
 
 .PHONY: build-all-in-one-linux
 build-all-in-one-linux: build_ui
@@ -182,7 +184,7 @@ build-all-in-one-linux: build_ui
 
 .PHONY: build-all-in-one
 build-all-in-one:
-	CGO_ENABLED=0 installsuffix=cgo go build -tags ui -o ./cmd/standalone/standalone-$(GOOS) $(BUILD_INFO) ./cmd/standalone/main.go
+	CGO_ENABLED=0 installsuffix=cgo go build -tags ui -o ./cmd/all-in-one/all-in-one-$(GOOS) $(BUILD_INFO) ./cmd/all-in-one/main.go
 
 .PHONY: build-agent
 build-agent:
@@ -195,6 +197,10 @@ build-query:
 .PHONY: build-collector
 build-collector:
 	CGO_ENABLED=0 installsuffix=cgo go build -o ./cmd/collector/collector-$(GOOS) $(BUILD_INFO) ./cmd/collector/main.go
+
+.PHONY: build-ingester
+build-ingester:
+	CGO_ENABLED=0 installsuffix=cgo go build -o ./cmd/ingester/ingester-$(GOOS) $(BUILD_INFO) ./cmd/ingester/main.go
 
 .PHONY: docker-no-ui
 docker-no-ui: build-binaries-linux build-crossdock-linux
@@ -216,7 +222,7 @@ build-binaries-darwin:
 	GOOS=darwin $(MAKE) build-platform-binaries
 
 .PHONY: build-platform-binaries
-build-platform-binaries: build-agent build-collector build-query build-all-in-one build-examples
+build-platform-binaries: build-agent build-collector build-query build-ingester build-all-in-one build-examples
 
 .PHONY: build-all-platforms
 build-all-platforms: build-binaries-linux build-binaries-windows build-binaries-darwin
@@ -227,7 +233,7 @@ docker-images-only:
 	@echo "Finished building jaeger-cassandra-schema =============="
 	docker build -t $(DOCKER_NAMESPACE)/jaeger-es-index-cleaner:${DOCKER_TAG} plugin/storage/es
 	@echo "Finished building jaeger-es-indices-clean =============="
-	for component in agent collector query ; do \
+	for component in agent collector query ingester ; do \
 		docker build -t $(DOCKER_NAMESPACE)/jaeger-$$component:${DOCKER_TAG} cmd/$$component ; \
 		echo "Finished building $$component ==============" ; \
 	done
@@ -242,7 +248,7 @@ docker-push:
 	if [ $$CONFIRM != "y" ] && [ $$CONFIRM != "Y" ]; then \
 		echo "Exiting." ; exit 1 ; \
 	fi
-	for component in agent cassandra-schema es-index-cleaner collector query example-hotrod; do \
+	for component in agent cassandra-schema es-index-cleaner collector query ingester example-hotrod; do \
 		docker push $(DOCKER_NAMESPACE)/jaeger-$$component ; \
 	done
 
@@ -268,11 +274,12 @@ build-crossdock-fresh: build-crossdock-linux
 
 .PHONY: install-tools
 install-tools:
-	go get github.com/wadey/gocovmerge
-	go get golang.org/x/tools/cmd/cover
-	go get github.com/golang/lint/golint
-	go get github.com/sectioneight/md-to-godoc
-	go get github.com/GoASTScanner/gas/cmd/gas/...
+	go get -u github.com/wadey/gocovmerge
+	go get -u golang.org/x/tools/cmd/cover
+	go get -u github.com/golang/lint/golint
+	go get -u github.com/sectioneight/md-to-godoc
+	go get -u github.com/securego/gosec/cmd/gosec/...
+	go get -u honnef.co/go/tools/cmd/gosimple
 
 .PHONY: install-ci
 install-ci: install install-tools
@@ -381,6 +388,7 @@ $$GOPATH/src/github.com/jaegertracing/jaeger/model \
 .PHONY: proto-install
 proto-install:
 	go install \
+		./vendor/github.com/golang/protobuf/protoc-gen-go \
 		./vendor/github.com/gogo/protobuf/protoc-gen-gogo \
 		./vendor/github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway \
 		./vendor/github.com/grpc-ecosystem/grpc-gateway/protoc-gen-swagger

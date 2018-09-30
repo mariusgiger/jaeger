@@ -26,10 +26,12 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
+	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	jaegerClientConfig "github.com/uber/jaeger-client-go/config"
+	jaegerClientZapLog "github.com/uber/jaeger-client-go/log/zap"
 	"github.com/uber/jaeger-lib/metrics"
 	"github.com/uber/tchannel-go"
 	"github.com/uber/tchannel-go/thrift"
@@ -53,14 +55,15 @@ import (
 	"github.com/jaegertracing/jaeger/plugin/storage"
 	"github.com/jaegertracing/jaeger/storage/dependencystore"
 	"github.com/jaegertracing/jaeger/storage/spanstore"
+	storageMetrics "github.com/jaegertracing/jaeger/storage/spanstore/metrics"
 	jc "github.com/jaegertracing/jaeger/thrift-gen/jaeger"
 	sc "github.com/jaegertracing/jaeger/thrift-gen/sampling"
 	zc "github.com/jaegertracing/jaeger/thrift-gen/zipkincore"
 )
 
-// standalone/main is a standalone full-stack jaeger backend, backed by a memory store
+// all-in-one/main is a standalone full-stack jaeger backend, backed by a memory store
 func main() {
-	var signalsChannel = make(chan os.Signal, 0)
+	var signalsChannel = make(chan os.Signal)
 	signal.Notify(signalsChannel, os.Interrupt, syscall.SIGTERM)
 
 	if os.Getenv(storage.SpanStorageTypeEnvVar) == "" {
@@ -76,7 +79,7 @@ func main() {
 	}
 	v := viper.New()
 	command := &cobra.Command{
-		Use:   "jaeger-standalone",
+		Use:   "jaeger-all-in-one",
 		Short: "Jaeger all-in-one distribution with agent, collector and query in one process.",
 		Long: `Jaeger all-in-one distribution with agent, collector and query. Use with caution this version
 		 uses only in-memory database.`,
@@ -128,18 +131,15 @@ func main() {
 			startCollector(cOpts, spanWriter, logger, metricsFactory, samplingHandler, hc)
 			startQuery(qOpts, spanReader, dependencyReader, logger, metricsFactory, mBldr, hc)
 			hc.Ready()
-
-			select {
-			case <-signalsChannel:
-				if closer, ok := spanWriter.(io.Closer); ok {
-					err := closer.Close()
-					if err != nil {
-						logger.Error("Failed to close span writer", zap.Error(err))
-					}
+			<-signalsChannel
+			logger.Info("Shutting down")
+			if closer, ok := spanWriter.(io.Closer); ok {
+				err := closer.Close()
+				if err != nil {
+					logger.Error("Failed to close span writer", zap.Error(err))
 				}
-
-				logger.Info("Jaeger Standalone is finishing")
 			}
+			logger.Info("Shutdown complete")
 			return nil
 		},
 	}
@@ -277,10 +277,18 @@ func startQuery(
 			Param: 1.0,
 		},
 		RPCMetrics: true,
-	}.New("jaeger-query", jaegerClientConfig.Metrics(baseFactory.Namespace("client", nil)))
+	}.New(
+		"jaeger-query",
+		jaegerClientConfig.Metrics(baseFactory.Namespace("client", nil)),
+		jaegerClientConfig.Logger(jaegerClientZapLog.NewLogger(logger)),
+	)
 	if err != nil {
 		logger.Fatal("Failed to initialize tracer", zap.Error(err))
 	}
+	opentracing.SetGlobalTracer(tracer)
+
+	spanReader = storageMetrics.NewReadMetricsDecorator(spanReader, baseFactory.Namespace("query", nil))
+
 	apiHandler := queryApp.NewAPIHandler(
 		spanReader,
 		depReader,

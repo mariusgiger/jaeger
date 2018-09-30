@@ -15,6 +15,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -153,7 +154,7 @@ func (aH *APIHandler) route(route string, args ...interface{}) string {
 }
 
 func (aH *APIHandler) getServices(w http.ResponseWriter, r *http.Request) {
-	services, err := aH.spanReader.GetServices()
+	services, err := aH.spanReader.GetServices(r.Context())
 	if aH.handleError(w, err, http.StatusInternalServerError) {
 		return
 	}
@@ -168,7 +169,7 @@ func (aH *APIHandler) getOperationsLegacy(w http.ResponseWriter, r *http.Request
 	vars := mux.Vars(r)
 	// given how getOperationsLegacy is bound to URL route, serviceParam cannot be empty
 	service, _ := url.QueryUnescape(vars[serviceParam])
-	operations, err := aH.spanReader.GetOperations(service)
+	operations, err := aH.spanReader.GetOperations(r.Context(), service)
 	if aH.handleError(w, err, http.StatusInternalServerError) {
 		return
 	}
@@ -186,7 +187,7 @@ func (aH *APIHandler) getOperations(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	operations, err := aH.spanReader.GetOperations(service)
+	operations, err := aH.spanReader.GetOperations(r.Context(), service)
 	if aH.handleError(w, err, http.StatusInternalServerError) {
 		return
 	}
@@ -206,12 +207,12 @@ func (aH *APIHandler) search(w http.ResponseWriter, r *http.Request) {
 	var uiErrors []structuredError
 	var tracesFromStorage []*model.Trace
 	if len(tQuery.traceIDs) > 0 {
-		tracesFromStorage, uiErrors, err = aH.tracesByIDs(tQuery.traceIDs)
+		tracesFromStorage, uiErrors, err = aH.tracesByIDs(r.Context(), tQuery.traceIDs)
 		if aH.handleError(w, err, http.StatusInternalServerError) {
 			return
 		}
 	} else {
-		tracesFromStorage, err = aH.spanReader.FindTraces(&tQuery.TraceQueryParameters)
+		tracesFromStorage, err = aH.spanReader.FindTraces(r.Context(), &tQuery.TraceQueryParameters)
 		if aH.handleError(w, err, http.StatusInternalServerError) {
 			return
 		}
@@ -233,11 +234,11 @@ func (aH *APIHandler) search(w http.ResponseWriter, r *http.Request) {
 	aH.writeJSON(w, r, &structuredRes)
 }
 
-func (aH *APIHandler) tracesByIDs(traceIDs []model.TraceID) ([]*model.Trace, []structuredError, error) {
+func (aH *APIHandler) tracesByIDs(ctx context.Context, traceIDs []model.TraceID) ([]*model.Trace, []structuredError, error) {
 	var errors []structuredError
 	retMe := make([]*model.Trace, 0, len(traceIDs))
 	for _, traceID := range traceIDs {
-		if trace, err := aH.spanReader.GetTrace(traceID); err != nil {
+		if trace, err := trace(ctx, traceID, aH.spanReader, aH.archiveSpanReader); err != nil {
 			if err != spanstore.ErrTraceNotFound {
 				return nil, nil, err
 			}
@@ -399,22 +400,31 @@ func (aH *APIHandler) withTraceFromReader(
 	if !ok {
 		return
 	}
-	trace, err := reader.GetTrace(traceID)
+	trace, err := trace(r.Context(), traceID, reader, backupReader)
 	if err == spanstore.ErrTraceNotFound {
-		if backupReader == nil {
-			aH.handleError(w, err, http.StatusNotFound)
-			return
-		}
-		trace, err = backupReader.GetTrace(traceID)
-		if err == spanstore.ErrTraceNotFound {
-			aH.handleError(w, err, http.StatusNotFound)
-			return
-		}
+		aH.handleError(w, err, http.StatusNotFound)
+		return
 	}
 	if aH.handleError(w, err, http.StatusInternalServerError) {
 		return
 	}
 	process(trace)
+}
+
+func trace(
+	ctx context.Context,
+	traceID model.TraceID,
+	reader spanstore.Reader,
+	backupReader spanstore.Reader,
+) (*model.Trace, error) {
+	trace, err := reader.GetTrace(ctx, traceID)
+	if err == spanstore.ErrTraceNotFound {
+		if backupReader == nil {
+			return nil, err
+		}
+		trace, err = backupReader.GetTrace(ctx, traceID)
+	}
+	return trace, err
 }
 
 // archiveTrace implements the REST API POST:/archive/{trace-id}.
@@ -447,6 +457,9 @@ func (aH *APIHandler) archiveTrace(w http.ResponseWriter, r *http.Request) {
 func (aH *APIHandler) handleError(w http.ResponseWriter, err error, statusCode int) bool {
 	if err == nil {
 		return false
+	}
+	if statusCode == http.StatusInternalServerError {
+		aH.logger.Error("HTTP handler, Internal Server Error", zap.Error(err))
 	}
 	structuredResp := structuredResponse{
 		Errors: []structuredError{

@@ -16,6 +16,8 @@ package spanstore
 
 import (
 	"context"
+	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"time"
@@ -26,10 +28,9 @@ import (
 	"gopkg.in/olivere/elastic.v5"
 
 	"github.com/jaegertracing/jaeger/model"
-	"github.com/jaegertracing/jaeger/model/converter/json"
-	jModel "github.com/jaegertracing/jaeger/model/json"
 	"github.com/jaegertracing/jaeger/pkg/cache"
 	"github.com/jaegertracing/jaeger/pkg/es"
+	"github.com/jaegertracing/jaeger/plugin/storage/es/spanstore/dbmodel"
 	storageMetrics "github.com/jaegertracing/jaeger/storage/spanstore/metrics"
 )
 
@@ -44,18 +45,21 @@ type spanWriterMetrics struct {
 	indexCreate *storageMetrics.WriteMetrics
 }
 
-type serviceWriter func(string, *jModel.Span)
+type serviceWriter func(string, *dbmodel.Span)
 
 // SpanWriter is a wrapper around elastic.Client
 type SpanWriter struct {
-	ctx           context.Context
-	client        es.Client
-	logger        *zap.Logger
-	writerMetrics spanWriterMetrics // TODO: build functions to wrap around each Do fn
-	indexCache    cache.Cache
-	serviceWriter serviceWriter
-	numShards     int64
-	numReplicas   int64
+	ctx                context.Context
+	client             es.Client
+	logger             *zap.Logger
+	writerMetrics      spanWriterMetrics // TODO: build functions to wrap around each Do fn
+	indexCache         cache.Cache
+	serviceWriter      serviceWriter
+	numShards          int64
+	numReplicas        int64
+	spanIndexPrefix    string
+	serviceIndexPrefix string
+	spanConverter      dbmodel.FromDomain
 }
 
 // Service is the JSON struct for service:operation documents in ElasticSearch
@@ -64,36 +68,44 @@ type Service struct {
 	OperationName string `json:"operationName"`
 }
 
-// Span adds a StartTimeMillis field to the standard JSON span.
-// ElasticSearch does not support a UNIX Epoch timestamp in microseconds,
-// so Jaeger maps StartTime to a 'long' type. This extra StartTimeMillis field
-// works around this issue, enabling timerange queries.
-type Span struct {
-	*jModel.Span
-	StartTimeMillis uint64 `json:"startTimeMillis"`
+func (s Service) hashCode() string {
+	h := fnv.New64a()
+	h.Write([]byte(s.ServiceName))
+	h.Write([]byte(s.OperationName))
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+// SpanWriterParams holds constructor parameters for NewSpanWriter
+type SpanWriterParams struct {
+	Client            es.Client
+	Logger            *zap.Logger
+	MetricsFactory    metrics.Factory
+	NumShards         int64
+	NumReplicas       int64
+	IndexPrefix       string
+	AllTagsAsFields   bool
+	TagKeysAsFields   []string
+	TagDotReplacement string
 }
 
 // NewSpanWriter creates a new SpanWriter for use
-func NewSpanWriter(
-	client es.Client,
-	logger *zap.Logger,
-	metricsFactory metrics.Factory,
-	numShards int64,
-	numReplicas int64,
-) *SpanWriter {
+func NewSpanWriter(p SpanWriterParams) *SpanWriter {
 	ctx := context.Background()
-	if numShards == 0 {
-		numShards = defaultNumShards
+	if p.NumShards == 0 {
+		p.NumShards = defaultNumShards
 	}
 
 	// TODO: Configurable TTL
-	serviceOperationStorage := NewServiceOperationStorage(ctx, client, metricsFactory, logger, time.Hour*12)
+	serviceOperationStorage := NewServiceOperationStorage(ctx, p.Client, p.MetricsFactory, p.Logger, time.Hour*12)
+	if p.IndexPrefix != "" {
+		p.IndexPrefix += ":"
+	}
 	return &SpanWriter{
 		ctx:    ctx,
-		client: client,
-		logger: logger,
+		client: p.Client,
+		logger: p.Logger,
 		writerMetrics: spanWriterMetrics{
-			indexCreate: storageMetrics.NewWriteMetrics(metricsFactory, "index_create"),
+			indexCreate: storageMetrics.NewWriteMetrics(p.MetricsFactory, "index_create"),
 		},
 		serviceWriter: serviceOperationStorage.Write,
 		indexCache: cache.NewLRUWithOptions(
@@ -102,16 +114,20 @@ func NewSpanWriter(
 				TTL: 48 * time.Hour,
 			},
 		),
-		numShards:   numShards,
-		numReplicas: numReplicas,
+		numShards:          p.NumShards,
+		numReplicas:        p.NumReplicas,
+		spanIndexPrefix:    p.IndexPrefix + spanIndex,
+		serviceIndexPrefix: p.IndexPrefix + serviceIndex,
+		spanConverter:      dbmodel.NewFromDomain(p.AllTagsAsFields, p.TagKeysAsFields, p.TagDotReplacement),
 	}
 }
 
 // WriteSpan writes a span and its corresponding service:operation in ElasticSearch
 func (s *SpanWriter) WriteSpan(span *model.Span) error {
-	spanIndexName, serviceIndexName := indexNames(span)
-	// Convert model.Span into json.Span
-	jsonSpan := json.FromDomainEmbedProcess(span)
+	spanIndexName := indexWithDate(s.spanIndexPrefix, span.StartTime)
+	serviceIndexName := indexWithDate(s.serviceIndexPrefix, span.StartTime)
+
+	jsonSpan := s.spanConverter.FromDomainEmbedProcess(span)
 
 	if err := s.createIndex(serviceIndexName, serviceMapping, jsonSpan); err != nil {
 		return err
@@ -129,12 +145,12 @@ func (s *SpanWriter) Close() error {
 	return s.client.Close()
 }
 
-func indexNames(span *model.Span) (string, string) {
-	spanDate := span.StartTime.UTC().Format("2006-01-02")
-	return spanIndexPrefix + spanDate, serviceIndexPrefix + spanDate
+func indexWithDate(indexPrefix string, date time.Time) string {
+	spanDate := date.UTC().Format("2006-01-02")
+	return indexPrefix + spanDate
 }
 
-func (s *SpanWriter) createIndex(indexName string, mapping string, jsonSpan *jModel.Span) error {
+func (s *SpanWriter) createIndex(indexName string, mapping string, jsonSpan *dbmodel.Span) error {
 	if !keyInCache(indexName, s.indexCache) {
 		start := time.Now()
 		exists, _ := s.client.IndexExists(indexName).Do(s.ctx) // don't need to check the error because the exists variable will be false anyway if there is an error
@@ -173,17 +189,15 @@ func (s *SpanWriter) fixMapping(mapping string) string {
 	return mapping
 }
 
-func (s *SpanWriter) writeService(indexName string, jsonSpan *jModel.Span) {
+func (s *SpanWriter) writeService(indexName string, jsonSpan *dbmodel.Span) {
 	s.serviceWriter(indexName, jsonSpan)
 }
 
-func (s *SpanWriter) writeSpan(indexName string, jsonSpan *jModel.Span) {
-	elasticSpan := Span{Span: jsonSpan, StartTimeMillis: jsonSpan.StartTime / 1000} // Microseconds to milliseconds
-
-	s.client.Index().Index(indexName).Type(spanType).BodyJson(&elasticSpan).Add()
+func (s *SpanWriter) writeSpan(indexName string, jsonSpan *dbmodel.Span) {
+	s.client.Index().Index(indexName).Type(spanType).BodyJson(&jsonSpan).Add()
 }
 
-func (s *SpanWriter) logError(span *jModel.Span, err error, msg string, logger *zap.Logger) error {
+func (s *SpanWriter) logError(span *dbmodel.Span, err error, msg string, logger *zap.Logger) error {
 	logger.
 		With(zap.String("trace_id", string(span.TraceID))).
 		With(zap.String("span_id", string(span.SpanID))).

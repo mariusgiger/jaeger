@@ -41,6 +41,10 @@ type Configuration struct {
 	BulkWorkers       int
 	BulkActions       int
 	BulkFlushInterval time.Duration
+	IndexPrefix       string
+	TagsFilePath      string
+	AllTagsAsFields   bool
+	TagDotReplacement string
 }
 
 // ClientBuilder creates new es.Client
@@ -49,6 +53,10 @@ type ClientBuilder interface {
 	GetNumShards() int64
 	GetNumReplicas() int64
 	GetMaxSpanAge() time.Duration
+	GetIndexPrefix() string
+	GetTagsFilePath() string
+	GetAllTagsAsFields() bool
+	GetTagDotReplacement() string
 }
 
 // NewClient creates a new ElasticSearch client
@@ -75,9 +83,19 @@ func (c *Configuration) NewClient(logger *zap.Logger, metricsFactory metrics.Fac
 			}
 			m.Delete(id)
 
-			duration := time.Since(start.(time.Time))
-			sm.Emit(err, duration)
+			// log individual errors, note that err might be false and these errors still present
+			if response.Errors {
+				for _, it := range response.Items {
+					for key, val := range it {
+						if val.Error != nil {
+							logger.Error("Elasticsearch part of bulk request failed", zap.String("map-key", key),
+								zap.Reflect("response", val))
+						}
+					}
+				}
+			}
 
+			sm.Emit(err, time.Since(start.(time.Time)))
 			if err != nil {
 				failed := len(response.Failed())
 				total := len(requests)
@@ -107,7 +125,7 @@ func (c *Configuration) ApplyDefaults(source *Configuration) {
 	if c.Password == "" {
 		c.Password = source.Password
 	}
-	if c.Sniffer == false {
+	if !c.Sniffer {
 		c.Sniffer = source.Sniffer
 	}
 	if c.MaxSpanAge == 0 {
@@ -146,6 +164,27 @@ func (c *Configuration) GetNumReplicas() int64 {
 // GetMaxSpanAge returns max span age from Configuration
 func (c *Configuration) GetMaxSpanAge() time.Duration {
 	return c.MaxSpanAge
+}
+
+// GetIndexPrefix returns index prefix
+func (c *Configuration) GetIndexPrefix() string {
+	return c.IndexPrefix
+}
+
+// GetTagsFilePath returns a path to file containing tag keys
+func (c *Configuration) GetTagsFilePath() string {
+	return c.TagsFilePath
+}
+
+// GetAllTagsAsFields returns true if all tags should be stored as object fields
+func (c *Configuration) GetAllTagsAsFields() bool {
+	return c.AllTagsAsFields
+}
+
+// GetTagDotReplacement returns character is used to replace dots in tag keys, when
+// the tag is stored as object field.
+func (c *Configuration) GetTagDotReplacement() string {
+	return c.TagDotReplacement
 }
 
 // GetConfigs wraps the configs to feed to the ElasticSearch client init
